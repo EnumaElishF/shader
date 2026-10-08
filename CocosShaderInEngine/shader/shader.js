@@ -1,164 +1,279 @@
-function main() {
-    // 步骤一：获取 gl
+// Cocos Shader 基础入门（四）：纹理映射 —— 修复版
+// 对照原文修复的点：
+//   1. render 必须接收 image（原文 function render() 缺参数 → ReferenceError: image is not defined，白屏）
+//   2. 上传纹理前需 gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)，否则图片上下颠倒
+//   3. image.src 改成本机服务地址（同源加载，避免跨域 SecurityError）
+// 文中案例：① 基础纹理(单图) ② 双纹理相乘 ③ 顶点色混合 ④ RGB 反转
 
-    // 创建画布： 手动创建的canvas能让传递给shader.html里调用gl使用，
-    // 否则如果直接在shader.html里直接创建会拿到的any类型，这样获得gl的参数必须要转换器一下，要不然拿不到他的参数接口。
-    const canvas = document.createElement('canvas');
-    document.getElementsByTagName('body')[0].appendChild(canvas);
+// 服务地址：优先使用用户给定的 192.168.1.21:8080；若页面是从同源的其它地址（如 127.0.0.1:8080）
+// 打开，则自动回退到当前页面 origin，避免跨域。务必从同一 origin 打开页面与图片。
+const TARGET = "http://192.168.1.21:8080";
+const SERVER = (location.origin === TARGET) ? TARGET : location.origin;
+const IMG = { icon: SERVER + "/icon.png", close: SERVER + "/close-icon.png" };
+
+function createShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        return shader;
+    }
+    console.error(gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+}
+
+function createProgram(gl, vertexShader, fragmentShader) {
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        return program;
+    }
+    console.error(gl.getProgramInfoLog(program));
+    gl.deleteProgram(program);
+}
+
+// 顶点着色器：所有案例共用（pos + uv + color 交错缓冲）
+const vertexShaderSource = `
+attribute vec2 a_position;
+attribute vec2 a_uv;
+attribute vec4 a_color;
+varying vec4 v_color;
+varying vec2 v_uv;
+void main() {
+    v_color = a_color;
+    v_uv = a_uv;
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+
+// 各案例对应的片元着色器
+const fragmentShaders = {
+    // ① 基础纹理：直接采样显示
+    single: `
+    precision mediump float;
+    varying vec2 v_uv;
+    varying vec4 v_color;
+    uniform sampler2D u_image;
+    void main() {
+        gl_FragColor = texture2D(u_image, v_uv);
+    }`,
+    // ② 双纹理相乘：两张纹理按相同 uv 采样后颜色相乘（白×原色=原色，黑×原色=黑）
+    multi: `
+    precision mediump float;
+    varying vec2 v_uv;
+    varying vec4 v_color;
+    uniform sampler2D u_image0;
+    uniform sampler2D u_image1;
+    void main() {
+        vec4 tex1 = texture2D(u_image0, v_uv);
+        vec4 tex2 = texture2D(u_image1, v_uv);
+        gl_FragColor = tex1 * tex2;
+    }`,
+    // ③ 顶点色混合：纹理色与顶点色相乘（镭射卡效果）
+    color: `
+    precision mediump float;
+    varying vec2 v_uv;
+    varying vec4 v_color;
+    uniform sampler2D u_image;
+    void main() {
+        vec4 tex1 = texture2D(u_image, v_uv);
+        gl_FragColor = tex1 * v_color;
+    }`,
+    // ④ RGB 反转：把红蓝通道对调
+    bgra: `
+    precision mediump float;
+    varying vec2 v_uv;
+    varying vec4 v_color;
+    uniform sampler2D u_image;
+    void main() {
+        gl_FragColor = texture2D(u_image, v_uv).bgra;
+    }`
+};
+
+// 构建交错缓冲：pos(2×float=8B) + uv(2×float=8B) + color(4×byte=4B) → stride 20 字节
+function buildGeometry(gl, ratio) {
+    const positions = [
+        -ratio, -1,
+        -ratio, 1,
+        ratio, -1,
+        ratio, 1
+    ];
+    const uvs = [
+        0, 0, // 左下角
+        0, 1, // 左上角
+        1, 0, // 右下角
+        1, 1  // 右上角
+    ];
+    // 顶点色（仅在 color 模式参与计算）
+    const colors = [
+        255, 0, 0, 255,
+        0, 255, 0, 255,
+        0, 0, 255, 255,
+        255, 127, 0, 255
+    ];
+    const indices = [0, 1, 2, 2, 1, 3];
+
+    const arrayBuffer = new ArrayBuffer((positions.length + uvs.length) * 4 + colors.length);
+    const float32Buffer = new Float32Array(arrayBuffer);
+    const colorBuffer = new Uint8Array(arrayBuffer);
+
+    let offset = 0;
+    for (let i = 0; i < positions.length; i += 2) {
+        float32Buffer[offset] = positions[i];
+        float32Buffer[offset + 1] = positions[i + 1];
+        offset += 5;
+    }
+    offset = 2;
+    for (let i = 0; i < uvs.length; i += 2) {
+        float32Buffer[offset] = uvs[i];
+        float32Buffer[offset + 1] = uvs[i + 1];
+        offset += 5;
+    }
+    offset = 16;
+    for (let j = 0; j < colors.length; j += 4) {
+        colorBuffer[offset] = colors[j];
+        colorBuffer[offset + 1] = colors[j + 1];
+        colorBuffer[offset + 2] = colors[j + 2];
+        colorBuffer[offset + 3] = colors[j + 3];
+        offset += 20;
+    }
+
+    const vertexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, arrayBuffer, gl.STATIC_DRAW);
+
+    const indexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+
+    return { vertexBuffer, indexBuffer, indices };
+}
+
+function render(mode, images) {
+    const canvas = document.getElementById('gl') || (function () {
+        const c = document.createElement('canvas');
+        c.id = 'gl';
+        document.body.appendChild(c);
+        return c;
+    })();
     canvas.width = 400;
     canvas.height = 300;
-    // 获取 WebGL 上下文（Context），后续统称 gl。
 
-    // 因为Cocos是三维渲染，所以这里选择webgl1或者webgl2都可以
-    const gl = canvas.getContext("webgl");
+    const gl = canvas.getContext('webgl');
     if (!gl) {
+        document.body.insertAdjacentHTML('beforeend', '<p style="color:red">当前浏览器不支持 WebGL</p>');
         return;
     }
 
-    // 步骤二：顶点着色器
+    // ratio：单图按图片比例保证不变形；双图沿用原文固定 0.5
+    const ratio = (mode === 'multi')
+        ? 0.5
+        : (images.icon.width / images.icon.height) / (canvas.width / canvas.height);
 
-    // 定义顶点着色器文本
-    const vertexShaderSource = `
-    // 接收顶点位置数据
-    attribute vec2 a_position;
-    // 着色器入口函数
-    void main() {
-        // gl_Position 接收的就是一个 vec4，因此需要转换
-        gl_Position = vec4(a_position, 0.0, 1.0);
-    }`;
-
-    // 根据着色器文本内容，创建 WebGL 上可以使用的着色器对象
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
-
-    // 步骤三：片元着色器
-
-    // uniform 是全局变量，无需通过顶点着色器作为中介，可在 CPU 端动态修改颜色
-    const fragmentShaderSource = `
-    precision mediump float;
-    uniform vec4 u_color;
-    // 着色器入口函数
-    void main() {
-        gl_FragColor = u_color;
-    }`;
-    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
-
-    // 步骤四：着色程序
-
-    // 将顶点着色器和片元着色器绑定到着色程序上。
-    // 这个上一章提过，着色程序需要成对提供，其中一个是顶点着色器，另一个是片元着色器
+    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaders[mode]);
     const program = createProgram(gl, vertexShader, fragmentShader);
+    if (!program) return;
 
-    // 高效绘制多个三角形：->>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // 只提供四个顶点
-    const positions = [
-        0, 0,
-        0, 0.5,
-        0.7, 0,
-        0.7, 0.5,
-    ];
+    const geo = buildGeometry(gl, ratio);
 
-    // 同时提供索引数组，从 positions 中取顶点构造顺序
-    // 索引从数组的 0 开始
-    const indices = [
-        0, 1, 2, // 第一个三角形
-        2, 1, 3  // 第二个三角形
-    ];
-
-    // 上传顶点缓冲
-    const vertexBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
-    // 上传索引缓冲
-    const indexBuffer = gl.createBuffer();
-    // ELEMENT_ARRAY_BUFFER 是专门用来绑定索引缓冲的
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    // 因为索引不会有小数点，所以取用无符号 16 位整型，合理分配内存
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
-
-    // 步骤五：处理绘制的前置工作
-
-    // 设置视口尺寸，将视口和画布尺寸同步
-    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-    // 清除画布颜色，直接设置成透明色。此处是为了便于观察，将它设置成黑色。
-    // 注意，渲染管线是每帧都会绘制内容，就好比每帧都在画板上画画，如果不清除的话，就有可能出现花屏现象
+    gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
-
-    // 步骤六：启动程序，启用顶点属性
-
-    // 启用我们当前需要的着色程序（uniform 必须在 useProgram 之后设置）
     gl.useProgram(program);
 
-    // 给顶点换个颜色：program 链接并启用后，再查询 uniform 位置并赋值
-    const vertexColorLocation = gl.getUniformLocation(program, 'u_color');
-    // 此处 color 要的可以是 4 个浮点型 color 或者一个浮点型数组，二者选其一即可
-    gl.uniform4f(vertexColorLocation, Math.random(), Math.random(), Math.random(), 1.0);
-
-    // 查询顶点要去的地方，并启用属性
-    const positionAttributeLocation = gl.getAttribLocation(program, "a_position");
+    const positionAttributeLocation = gl.getAttribLocation(program, 'a_position');
     gl.enableVertexAttribArray(positionAttributeLocation);
-    // 将顶点缓冲绑定到当前数据缓冲接口上，这样后续操作的缓冲都是当前绑定的缓冲。每次需要使用数据的时候都要绑定一次。
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 20, 0);
 
-    // 步骤七：告诉属性如何获取数据
+    const uvAttributeLocation = gl.getAttribLocation(program, 'a_uv');
+    gl.enableVertexAttribArray(uvAttributeLocation);
+    gl.vertexAttribPointer(uvAttributeLocation, 2, gl.FLOAT, false, 20, 8);
 
-    // gl.vertexAttribPointer(positionAttributeLocation, size, type, normalize, stride, offset);
-    // positionAttributeLocation：获取顶点着色器上的 “a_position” 属性的位置
-    // size：当前一个顶点数据里要取的数据长度，因为绘制的是平面三角形，所以位置只需提供 x，y 即可，所以数量是 2
-    // type：数据缓冲类型，此处顶点采用的是 float 32，因此使用 gl.FLOAT
-    // normalize：数据是否是归一化的数据，通常不用
-    // stride：主要表达数据存储的方式，单位是字节。0 表示属性数据是连续存放的，通常在只有一个属性的数据里这么用
-    // offset：属性在缓冲区中每间隔的偏移值，单位是字节
-    gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
-
-    // 步骤八：绘制（使用索引缓冲绘制矩形）
-
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    // gl.drawElements(primitiveType, count, indexType, offset);
-    // indexType：指定元素数组缓冲区中的值的类型。有 gl.UNSIGNED_BYTE、gl.UNSIGNED_SHORT 以及扩展类型
-    // gl.UNSIGNED_BYTE 最大索引值为 255，gl.UNSIGNED_SHORT 最大索引值为 65535
-    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-
-    // 到此处为止就正式启动了绘制的流程了，后续的处理就交给顶点着色器和片段着色器了
-}
-
-// 创建着色器 shader。gl：WebGL 上下文；type：着色器类型；source：着色器文本
-function createShader(gl, type, source) {
-    // 根据 type 创建着色器
-    var shader = gl.createShader(type);
-    // 绑定内容文本 source
-    gl.shaderSource(shader, source);
-    // 编译着色器（将文本内容转换成着色器）
-    gl.compileShader(shader);
-    // 获取编译后的状态
-    var success = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
-    if (success) {
-        return shader;
+    const colorAttributeLocation = gl.getAttribLocation(program, 'a_color');
+    if (colorAttributeLocation >= 0) { // 仅 color 模式用到；其余模式可能被链接器优化掉，返回 -1
+        gl.enableVertexAttribArray(colorAttributeLocation);
+        gl.vertexAttribPointer(colorAttributeLocation, 4, gl.UNSIGNED_BYTE, true, 20, 16);
     }
 
-    // 获取当前着色器相关信息
-    console.log(gl.getShaderInfoLog(shader));
-    // 删除失败的着色器
-    gl.deleteShader(shader);
-}
-// 创建着色程序 program。gl：WebGL 上下文；vertexShader：顶点着色器对象；fragmentShader：片元着色器对象
-function createProgram(gl, vertexShader, fragmentShader) {
-    // 创建着色程序
-    var program = gl.createProgram();
-    // 让着色程序获取到顶点着色器
-    gl.attachShader(program, vertexShader);
-    // 让着色程序获取到片元着色器
-    gl.attachShader(program, fragmentShader);
-    // 将两个着色器与着色程序进行绑定
-    gl.linkProgram(program);
-    var success = gl.getProgramParameter(program, gl.LINK_STATUS);
-    if (success) {
-        return program;
+    gl.bindBuffer(gl.ARRAY_BUFFER, geo.vertexBuffer);
+
+    // 纹理绑定：multi 两张（icon + close-icon），其余一张（icon）
+    const samplers = (mode === 'multi')
+        ? [['u_image0', images.icon], ['u_image1', images.close]]
+        : [['u_image', images.icon]];
+
+    for (let j = 0; j < samplers.length; j++) {
+        const [name, img] = samplers[j];
+        const loc = gl.getUniformLocation(program, name);
+        gl.uniform1i(loc, j); // 指定该 sampler 使用第 j 个纹理单元
+        const texture = gl.createTexture();
+        gl.activeTexture(gl.TEXTURE0 + j);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        // 关键：上传前翻转 Y，纠正图片上下颠倒
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
     }
 
-    console.log(gl.getProgramInfoLog(program));
-    // 绑定失败则删除着色程序
-    gl.deleteProgram(program);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, geo.indexBuffer);
+    gl.drawElements(gl.TRIANGLES, geo.indices.length, gl.UNSIGNED_SHORT, 0);
+
+    // 自检：读回像素，确认确实画出了内容（非背景像素数量）
+    const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let nonBg = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i] > 8 || pixels[i + 1] > 8 || pixels[i + 2] > 8) nonBg++;
+    }
+    console.log('RENDER_DONE mode=' + mode + ' nonBgPixels=' + nonBg);
+}
+
+function main() {
+    // 控制按钮
+    const box = document.createElement('div');
+    box.innerHTML = `
+        <p><b>纹理映射案例（修复版，对应《WEBGL 纹理映射 基本》）</b></p>
+        <button data-mode="single">① 基础纹理(单图)</button>
+        <button data-mode="multi">② 双纹理相乘</button>
+        <button data-mode="color">③ 顶点色混合</button>
+        <button data-mode="bgra">④ RGB反转</button>
+        <p style="color:#666;font-size:12px">请通过 <code>${TARGET}/shader.html</code> 同源打开本页（不可跨域混用地址）。</p>`;
+    document.body.insertBefore(box, document.body.firstChild);
+    box.addEventListener('click', function (e) {
+        const btn = e.target.closest('button');
+        if (!btn || !loaded.icon) return;
+        render(btn.dataset.mode, loaded);
+    });
+
+    // 预加载图片（icon 必选；close 仅双纹理用到）
+    const loaded = {};
+    const keys = Object.keys(IMG);
+    let left = keys.length;
+    let failed = false;
+    keys.forEach(function (k) {
+        const img = new Image();
+        img.onload = function () {
+            loaded[k] = img;
+            if (--left === 0 && !failed) {
+                // 支持 ?mode=xxx 直接指定初始案例（便于验证/分享）
+                const params = new URLSearchParams(location.search);
+                const init = params.get('mode') || 'single';
+                render(init, loaded);
+            }
+        };
+        img.onerror = function () {
+            failed = true;
+            document.body.insertAdjacentHTML('beforeend',
+                '<p style="color:red">图片加载失败：' + IMG[k] +
+                '<br>请确认从同一地址（' + TARGET + '）打开本页面，不要跨域混用 127.0.0.1 / 192.168.x.x。</p>');
+        };
+        img.src = IMG[k];
+    });
 }
 
 main();
