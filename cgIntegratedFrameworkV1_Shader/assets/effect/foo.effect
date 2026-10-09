@@ -1,12 +1,8 @@
-// Copyright (c) 2017-2020 Xiamen Yaji Software Co., Ltd.
 CCEffect %{
   techniques:
   - passes:
-    - vert: sprite-vs:vert
-      frag: sprite-fs:frag
-      depthStencilState:
-        depthTest: false
-        depthWrite: false
+    - vert: vs:vert
+      frag: fs:frag
       blendState:
         targets:
         - blend: true
@@ -15,11 +11,15 @@ CCEffect %{
           blendDstAlpha: one_minus_src_alpha
       rasterizerState:
         cullMode: none
+      properties:
+        u_dissolveMap: { value: white, editor: { tooltip: '噪声贴图' } }
+        dissolveThreshold: { value: 0.5, editor: { range:[0, 1, 0.01], slide: true, tooltip: '溶解阈值' } } # 此处定义的参数都必须指向 CCProgram 处对应声明的 uniform
 }%
 
-CCProgram sprite-vs %{
+CCProgram vs %{
   precision highp float;
   #include <cc-global>
+
   in vec3 a_position;
   in vec2 a_texCoord;
   in vec4 a_color;
@@ -37,29 +37,44 @@ CCProgram sprite-vs %{
   }
 }%
 
-CCProgram sprite-fs %{
+CCProgram fs %{
   precision highp float;
 
   in vec4 color;
 
+  uniform Dissolve{
+    float dissolveThreshold;// 熔岩阀值[0, 1];
+  };
+
   #if USE_TEXTURE
     in vec2 uv0;
+    uniform sampler2D u_dissolveMap;// 熔岩形状的纹理;
     #pragma builtin(local)
     layout(set = 2, binding = 10) uniform sampler2D cc_spriteTexture;
-    // 此处的 cc_spriteTexture 已经被 Sprite 组件使用，因此保留 layout 部分的声明
-    // 如果后续有自定义的 uniform，则可以不指定 layout
   #endif
 
-  vec4 frag () {
+   vec4 frag () {
     vec4 o = vec4(1, 1, 1, 1);
+    float value = 1.0;
 
     #if USE_TEXTURE
-    // 直接取出 embedded-alpha 里 CCSampleWithAlphaSeparated 我们需要的那部分内容
-      o *= texture(cc_spriteTexture, uv0);
+        vec4 dissolveMap = texture(u_dissolveMap, uv0); // 如果颜色的 r 分量小于阀值，将这个着色操作丢弃;
+        value *= dissolveMap.r;
+    #endif
+
+     if (value < dissolveThreshold) {
+      discard; // 将小于阈值的片段丢弃，形成溶解
+    }
+
+    #if USE_TEXTURE
+      o *= texture(cc_spriteTexture, uv0); // 与原纹理混合;
     #endif
 
     o *= color;
-    // alpha-test 内的 ALPHA_TEST 是一个和阈值进行判断然后丢弃片段的行为，在这里不需要，所以直接删除
+    if (value < dissolveThreshold + 0.05) {
+      o = vec4(0.9, 0.6, 0.3, o.a); // 溶解的边缘设置一个边缘过度色
+    }
+
     return o;
   }
 }%

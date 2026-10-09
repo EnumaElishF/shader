@@ -26,6 +26,12 @@
     }
   ],
   "_props": [
-    {}
+    {
+      "u_dissolveMap": {
+        "__uuid__": "15767f3e-d803-45bb-a366-8749c587a92d@6c48a",
+        "__expectedType__": "cc.Texture2D"
+      },
+      "dissolveThreshold": 0.37
+    }
   ]
 }
