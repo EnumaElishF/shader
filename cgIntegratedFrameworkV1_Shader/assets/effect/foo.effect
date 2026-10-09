@@ -1,0 +1,65 @@
+// Copyright (c) 2017-2020 Xiamen Yaji Software Co., Ltd.
+CCEffect %{
+  techniques:
+  - passes:
+    - vert: sprite-vs:vert
+      frag: sprite-fs:frag
+      depthStencilState:
+        depthTest: false
+        depthWrite: false
+      blendState:
+        targets:
+        - blend: true
+          blendSrc: src_alpha
+          blendDst: one_minus_src_alpha
+          blendDstAlpha: one_minus_src_alpha
+      rasterizerState:
+        cullMode: none
+}%
+
+CCProgram sprite-vs %{
+  precision highp float;
+  #include <cc-global>
+  in vec3 a_position;
+  in vec2 a_texCoord;
+  in vec4 a_color;
+
+  out vec4 color;
+  out vec2 uv0;
+
+  vec4 vert () {
+    vec4 pos = vec4(a_position, 1);
+    pos = cc_matViewProj * pos;
+    uv0 = a_texCoord;
+    color = a_color;
+
+    return pos;
+  }
+}%
+
+CCProgram sprite-fs %{
+  precision highp float;
+
+  in vec4 color;
+
+  #if USE_TEXTURE
+    in vec2 uv0;
+    #pragma builtin(local)
+    layout(set = 2, binding = 10) uniform sampler2D cc_spriteTexture;
+    // 此处的 cc_spriteTexture 已经被 Sprite 组件使用，因此保留 layout 部分的声明
+    // 如果后续有自定义的 uniform，则可以不指定 layout
+  #endif
+
+  vec4 frag () {
+    vec4 o = vec4(1, 1, 1, 1);
+
+    #if USE_TEXTURE
+    // 直接取出 embedded-alpha 里 CCSampleWithAlphaSeparated 我们需要的那部分内容
+      o *= texture(cc_spriteTexture, uv0);
+    #endif
+
+    o *= color;
+    // alpha-test 内的 ALPHA_TEST 是一个和阈值进行判断然后丢弃片段的行为，在这里不需要，所以直接删除
+    return o;
+  }
+}%
