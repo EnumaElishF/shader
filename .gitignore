@@ -22,3 +22,22 @@ node_modules/
 # WebStorm
 #//////////////////////////
 .idea/
+
+#//////////////////////////
+# AI Assistants / WorkBuddy
+#//////////////////////////
+# WorkBuddy / AI 记忆与工作目录（本地生成，禁止上传）
+.workbuddy/
+# AI 身份/上下文 Markdown（由 AI 工具生成，非项目源码）
+SOUL.md
+IDENTITY.md
+USER.md
+BOOTSTRAP.md
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+# 其他 AI 工具配置
+.cursor/
+.cursorrules
+.windsurf/
+.continue/
